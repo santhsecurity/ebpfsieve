@@ -1,0 +1,9 @@
+[1;34m▸ [rust] cargo check --workspace[0m
+[localhost] FAILED (check failed, exit 101)
+
+1 error(s):
+  error: could not compile `ebpfsieve` (lib) due to 1 previous error
+
+1 warning(s)
+
+[1;32m▸ Cached → /tmp/t-cache-568776f19960/check.out[0m
