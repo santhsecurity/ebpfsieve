@@ -1,0 +1,6 @@
+[localhost] FAILED (test failed, exit 101)
+
+5 error(s):
+  error[E0609]: no field `application` on type `AndroidManifest`
+  error[E0560]: struct `AndroidManifest` has no field named `application`
+  error[E0277]: the `?` operator can only be used in a function that returns `Result` or `Option` (or another type that implements `FromResidual`)

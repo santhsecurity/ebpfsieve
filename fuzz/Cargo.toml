@@ -1,0 +1,23 @@
+[package]
+name = "ebpfsieve-fuzz"
+version = "0.0.0"
+edition = "2021"
+repository = "https://github.com/santhsecurity/Santh"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ebpfsieve = { path = ".." }
+
+[[bin]]
+name = "fuzz_scan"
+path = "fuzz_targets/fuzz_scan.rs"
+
+[[bin]]
+name = "fuzz_filter"
+path = "fuzz_targets/fuzz_filter.rs"
+
+[workspace]
