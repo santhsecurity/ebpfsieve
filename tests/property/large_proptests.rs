@@ -15,9 +15,9 @@ proptest! {
             .unwrap()
             .with_window_size(w_size)
             .unwrap();
-            
+
         let matches = filter.matching_windows(&data);
-        
+
         for m in matches {
             let start = m.offset as usize;
             let end = start + m.length;
@@ -38,17 +38,17 @@ proptest! {
             ByteThreshold::new(b1, t1),
             ByteThreshold::new(b2, t2)
         ]).unwrap().with_window_size(w_size).unwrap();
-        
+
         let matches = filter.matching_windows(&data);
-        
+
         for m in matches {
             let start = m.offset as usize;
             let end = start + m.length;
             let window = &data[start..end];
-            
+
             let count1 = window.iter().filter(|&&b| b == b1).count();
             let count2 = window.iter().filter(|&&b| b == b2).count();
-            
+
             assert!(count1 >= t1 as usize, "First threshold failed");
             assert!(count2 >= t2 as usize, "Second threshold failed");
         }
