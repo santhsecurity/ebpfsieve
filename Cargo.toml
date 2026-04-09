@@ -6,11 +6,13 @@ rust-version = "1.85"
 authors = ["Corum Collective LLC <contact@santh.io>"]
 description = "Byte-frequency prefilter for read-heavy scanning pipelines with optional eBPF offload"
 license = "MIT"
-repository = "https://github.com/santhsecurity/Santh"
+repository = "https://github.com/santhsecurity/ebpfsieve"
+homepage = "https://github.com/santhsecurity/ebpfsieve"
+documentation = "https://docs.rs/ebpfsieve"
 readme = "README.md"
 keywords = ["ebpf", "sieve", "performance", "filtering", "prefilter"]
 categories = ["network-programming", "os", "performance"]
-include = ["src/**", "Cargo.toml", "README.md", "build.rs"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE", "build.rs"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }

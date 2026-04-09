@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ebpfsieve = { path = ".." }
+ebpfsieve = { version = "0.1.0", path = ".." }
 
 [[bin]]
 name = "fuzz_scan"
