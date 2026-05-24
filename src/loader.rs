@@ -137,9 +137,9 @@ impl<R: Read> FileReadFilter<R> {
             .matching_windows(&window)
             .into_iter()
             .filter(|range| {
-                usize::try_from(range.offset)
-                    .map(|offset| offset.saturating_add(range.length) > carry_len)
-                    .unwrap_or(true)
+                usize::try_from(range.offset).map_or(true, |offset| {
+                    offset.saturating_add(range.length) > carry_len
+                })
             })
             .map(|range| MatchWindow {
                 offset: chunk_offset + range.offset,

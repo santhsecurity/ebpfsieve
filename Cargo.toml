@@ -20,7 +20,12 @@ toml = { version = "0.8", optional = true }
 thiserror = "2"
 libc = "0.2"
 aya = { version = "0.13", optional = true }
-ebpfkit = { version = "0.1", path = "../../kernel/ebpfkit", optional = true }
+# ebpfkit isn't on crates.io yet; consume the standalone
+# santhsecurity/ebpfkit repo by git ref so the standalone
+# ebpfsieve repo builds for external users. (The previous
+# path = "../../kernel/ebpfkit" assumed a monorepo layout
+# that doesn't exist outside the Santh monorepo.)
+ebpfkit = { git = "https://github.com/santhsecurity/ebpfkit", branch = "main", optional = true }
 
 [dev-dependencies]
 proptest = "1.0"
