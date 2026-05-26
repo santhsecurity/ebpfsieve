@@ -17,6 +17,12 @@ name = "fuzz_scan"
 path = "fuzz_targets/fuzz_scan.rs"
 
 [[bin]]
+name = "fuzz_matching_windows"
+path = "fuzz_targets/fuzz_matching_windows.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_filter"
 path = "fuzz_targets/fuzz_filter.rs"
 

@@ -1,3 +1,6 @@
+[workspace]
+members = ["."]
+
 [package]
 name = "ebpfsieve"
 version = "0.1.0"
@@ -26,6 +29,10 @@ aya = { version = "0.13", optional = true }
 # path = "../../kernel/ebpfkit" assumed a monorepo layout
 # that doesn't exist outside the Santh monorepo.)
 ebpfkit = { git = "https://github.com/santhsecurity/ebpfkit", branch = "main", optional = true }
+
+[[test]]
+name = "shard_s_perf_pmg_edge"
+path = "tests/shard_s_perf_pmg_edge.rs"
 
 [dev-dependencies]
 proptest = "1.0"
