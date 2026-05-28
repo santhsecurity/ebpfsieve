@@ -1,5 +1,7 @@
 # ebpfsieve
 
+Part of [Santh](https://santh.dev) - open source Rust security and infrastructure tooling. Follow [@SanthProject](https://x.com/SanthProject) on X.
+
 Byte-frequency prefilter for read-heavy scanning pipelines, with optional eBPF offload.
 
 ## What it does
