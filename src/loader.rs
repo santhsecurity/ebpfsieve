@@ -1,9 +1,10 @@
 //! File reading and chunk loading.
 
 use crate::error::Error;
+use crate::kernel::KernelFilter;
 use crate::map::MatchWindow;
 use crate::program::ByteFrequencyFilter;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 /// Result of one attached read.
 ///
@@ -30,6 +31,11 @@ pub struct FilteredChunk {
     pub offset: u64,
     /// Raw bytes read from the underlying source, including overlap bytes.
     pub data: Vec<u8>,
+    /// Count of newly-read source bytes in this chunk, EXCLUDING the carried-over
+    /// overlap already counted by the previous chunk. Callers tracking a byte
+    /// budget must accumulate this, not `data.len()` (which double-counts the
+    /// overlap and trips a `max_bytes` limit early).
+    pub new_bytes: usize,
     /// Candidate ranges reported within this chunk.
     pub candidate_ranges: Vec<MatchWindow>,
 }
@@ -58,6 +64,21 @@ pub struct FileReadFilter<R> {
     carry: Vec<u8>,
     next_offset: u64,
     finished: bool,
+    /// Reusable read scratch buffer. `read_next` fills this, copies its contents
+    /// into the returned chunk's window, then keeps the allocation for the next
+    /// call - avoiding a fresh `vec![0u8; chunk_size]` heap allocation on every
+    /// chunk in the hot read loop.
+    read_buf: Vec<u8>,
+    /// Optional cap on the next read size. Used by `ByteFrequencyFilter::scan_file`
+    /// to avoid reading past `max_bytes` on the final chunk.
+    next_read_limit: Option<usize>,
+    /// Optional kernel filter that emits skip decisions for this reader.
+    kernel_filter: Option<KernelFilter>,
+    /// Optional seek function pointer. Set when the reader is `Seek` so skip
+    /// decisions can advance the reader past no-match regions. Non-seekable
+    /// readers keep this as `None` and skip decisions are ignored rather than
+    /// silently degrading to a slower path.
+    seek_fn: Option<fn(&mut R, SeekFrom) -> std::io::Result<u64>>,
 }
 
 impl<R: Read> FileReadFilter<R> {
@@ -81,13 +102,53 @@ impl<R: Read> FileReadFilter<R> {
             carry: Vec::new(),
             next_offset: 0,
             finished: false,
+            read_buf: Vec::new(),
+            next_read_limit: None,
+            kernel_filter: None,
+            seek_fn: None,
         }
+    }
+
+    /// Creates a new attached reader that can seek, enabling kernel-filter skip decisions
+    /// to advance the reader past regions that cannot contain matches.
+    #[must_use]
+    pub fn new_seekable(reader: R, filter: ByteFrequencyFilter) -> Self
+    where
+        R: Seek,
+    {
+        Self {
+            reader,
+            filter,
+            carry: Vec::new(),
+            next_offset: 0,
+            finished: false,
+            read_buf: Vec::new(),
+            next_read_limit: None,
+            kernel_filter: None,
+            seek_fn: Some(<R as Seek>::seek),
+        }
+    }
+
+    /// Attach a kernel filter that will emit skip decisions for this reader.
+    ///
+    /// Skip decisions are only applied when the reader is seekable; otherwise they are
+    /// ignored (no silent fallback).
+    pub fn set_kernel_filter(&mut self, filter: KernelFilter) {
+        self.kernel_filter = Some(filter);
     }
 
     /// Returns the attached filter configuration.
     #[must_use]
     pub fn filter(&self) -> &ByteFrequencyFilter {
         &self.filter
+    }
+
+    /// Cap the next read to at most `limit` bytes, then clear the cap.
+    ///
+    /// Used by `ByteFrequencyFilter::scan_file` with a `max_bytes` budget so
+    /// the final read does not over-request bytes and block on slow streams.
+    pub fn set_next_read_limit(&mut self, limit: usize) {
+        self.next_read_limit = Some(limit);
     }
 
     /// Reads the next chunk and returns candidate ranges, or `None` at EOF.
@@ -105,19 +166,73 @@ impl<R: Read> FileReadFilter<R> {
             return Ok(None);
         }
 
-        let mut buf = vec![0u8; self.filter.chunk_size()];
+        // Poll the kernel filter for skip decisions ONLY when the reader is
+        // seekable. If it is not seekable, the decisions are unusable (Law 10 -
+        // no silent degrade to a slower scan) AND polling them would be pure
+        // waste, so we do not poll at all. When seekable, iterate the borrowed
+        // slice returned by `poll_skips` in place - the previous code copied it
+        // into a fresh `Vec` on every single chunk read (Law 7 hot-path alloc),
+        // even on the overwhelmingly common no-skip path where the slice is
+        // empty. `poll_skips` borrows `self.kernel_filter`; the seek/carry/offset
+        // fields it touches are disjoint, so the borrow is sound.
+        if let Some(seek_fn) = self.seek_fn {
+            if let Some(kf) = self.kernel_filter.as_mut() {
+                for decision in kf.poll_skips() {
+                    if decision.file_offset >= self.next_offset {
+                        let skip_end = decision.file_offset.saturating_add(decision.skip_length);
+                        match seek_fn(&mut self.reader, SeekFrom::Start(skip_end)) {
+                            Ok(new_pos) => self.next_offset = new_pos,
+                            Err(source) => {
+                                let carry_len = self.carry.len();
+                                let chunk_offset =
+                                    self.next_offset.saturating_sub(carry_len as u64);
+                                let data = std::mem::take(&mut self.carry);
+                                return Err((
+                                    FilteredChunk {
+                                        offset: chunk_offset,
+                                        data,
+                                        new_bytes: 0,
+                                        candidate_ranges: Vec::new(),
+                                    },
+                                    Error::ReadFailed { source },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reuse the scratch buffer across calls (retains its capacity) instead
+        // of allocating `vec![0u8; chunk_size]` every chunk. `read` fills up to
+        // buf.len() bytes, so it must be sized to the effective chunk size first.
+        let read_size = self
+            .next_read_limit
+            .take()
+            .unwrap_or(self.filter.chunk_size())
+            .min(self.filter.chunk_size());
+        self.read_buf.resize(read_size, 0);
         let bytes_read = loop {
-            match self.reader.read(&mut buf) {
+            // Disjoint field borrow: `reader` and `read_buf` are distinct fields.
+            match self.reader.read(&mut self.read_buf) {
                 Ok(n) => break n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
                 Err(source) => {
-                    // Return partial results alongside the error
-                    let empty_chunk = FilteredChunk {
-                        offset: self.next_offset,
-                        data: Vec::new(),
-                        candidate_ranges: Vec::new(),
-                    };
-                    return Err((empty_chunk, Error::ReadFailed { source }));
+                    // Return the carried overlap as a partial chunk so the caller
+                    // has the bytes seen so far. Matches inside the carry were
+                    // already reported as part of the previous chunk.
+                    let carry_len = self.carry.len();
+                    let chunk_offset = self.next_offset.saturating_sub(carry_len as u64);
+                    let data = std::mem::take(&mut self.carry);
+                    return Err((
+                        FilteredChunk {
+                            offset: chunk_offset,
+                            data,
+                            new_bytes: 0,
+                            candidate_ranges: Vec::new(),
+                        },
+                        Error::ReadFailed { source },
+                    ));
                 }
             }
         };
@@ -125,22 +240,17 @@ impl<R: Read> FileReadFilter<R> {
             self.finished = true;
             return Ok(None);
         }
-        buf.truncate(bytes_read);
+        self.read_buf.truncate(bytes_read);
 
         let carry_len = self.carry.len();
         let chunk_offset = self.next_offset.saturating_sub(carry_len as u64);
         let mut window = std::mem::take(&mut self.carry);
-        window.extend_from_slice(&buf);
+        window.extend_from_slice(&self.read_buf);
 
         let candidate_ranges = self
             .filter
             .matching_windows(&window)
             .into_iter()
-            .filter(|range| {
-                usize::try_from(range.offset).map_or(true, |offset| {
-                    offset.saturating_add(range.length) > carry_len
-                })
-            })
             .map(|range| MatchWindow {
                 offset: chunk_offset + range.offset,
                 length: range.length,
@@ -158,7 +268,242 @@ impl<R: Read> FileReadFilter<R> {
         Ok(Some(FilteredChunk {
             offset: chunk_offset,
             data: window,
+            new_bytes: bytes_read,
             candidate_ranges,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ByteFrequencyFilter, ByteThreshold};
+    use std::io::Cursor;
+
+    #[test]
+    fn read_next_new_bytes_sums_to_input_length_excluding_overlap() {
+        // 16-byte input, window_size 4 (so 3 overlap bytes carry between chunks)
+        // and chunk_size 5 forces several chunks. `data.len()` repeats the carry
+        // each chunk and overcounts; `new_bytes` must sum to exactly the input.
+        let input: &[u8] = b"abcdefghijklmnop";
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 1)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(5)
+            .unwrap();
+        let mut reader = filter.attach(Cursor::new(input));
+
+        let mut total_new = 0usize;
+        let mut total_data = 0usize;
+        let mut saw_overlap = false;
+        while let Some(chunk) = reader.read_next().unwrap() {
+            total_new += chunk.new_bytes;
+            total_data += chunk.data.len();
+            if chunk.data.len() > chunk.new_bytes {
+                saw_overlap = true;
+            }
+        }
+
+        assert_eq!(
+            total_new,
+            input.len(),
+            "new_bytes must sum to the true input length"
+        );
+        assert!(
+            total_data > input.len(),
+            "data.len() sum ({total_data}) overcounts because of carried overlap"
+        );
+        assert!(
+            saw_overlap,
+            "expected at least one chunk to carry overlap bytes (data.len() > new_bytes)"
+        );
+    }
+
+    #[test]
+    fn read_next_returns_carry_on_error() {
+        // Custom reader that returns bytes on the first read, then errors.
+        struct FailAfterFirst {
+            data: Vec<u8>,
+            first: bool,
+        }
+        impl std::io::Read for FailAfterFirst {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.first {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "simulated read failure",
+                    ));
+                }
+                self.first = false;
+                let n = buf.len().min(self.data.len());
+                buf[..n].copy_from_slice(&self.data[..n]);
+                Ok(n)
+            }
+        }
+
+        // window_size=4, chunk_size=8, input 16 bytes. First read consumes 8 bytes
+        // and leaves 3 carry bytes. The next read fails and must return those 3
+        // carry bytes as the partial chunk data.
+        let input = b"abcdefghijklmnop";
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 1)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(8)
+            .unwrap();
+        let mut reader = filter.attach(FailAfterFirst {
+            data: input.to_vec(),
+            first: true,
+        });
+
+        let chunk = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk.new_bytes, 8);
+
+        let (partial, _err) = reader.read_next().unwrap_err();
+        assert_eq!(partial.new_bytes, 0);
+        assert_eq!(partial.data, b"fgh"); // last 3 bytes of first read
+        assert_eq!(partial.offset, 5);   // offset of 'f' in the original stream
+    }
+
+    #[test]
+    fn next_read_limit_clamps_final_chunk_size() {
+        // Regression: scan_file used to read a full chunk before checking
+        // max_bytes, which could over-read and block on slow streams. Verify
+        // that set_next_read_limit caps the number of bytes requested by the
+        // next read_next call.
+        let input: &[u8] = b"abcdefghijklmnop"; // 16 bytes
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 1)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(10)
+            .unwrap();
+        let mut reader = filter.attach(Cursor::new(input));
+
+        // First read: full chunk of 10 bytes.
+        let chunk1 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk1.new_bytes, 10);
+
+        // Set a cap of 3 bytes for the next read; it must not exceed the cap.
+        reader.set_next_read_limit(3);
+        let chunk2 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk2.new_bytes, 3);
+
+        // Verify the total input was consumed (10 + 3 + 3 = 16).
+        reader.set_next_read_limit(3);
+        let chunk3 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk3.new_bytes, 3);
+
+        assert!(reader.read_next().unwrap().is_none());
+    }
+
+    #[test]
+    fn reused_read_buffer_does_not_corrupt_chunk_data() {
+        // Regression for loader.rs:108 (buffer reuse): read_next now keeps one
+        // scratch buffer across calls instead of allocating per chunk. If a
+        // shorter final read left stale bytes from a previous (larger) chunk,
+        // the reassembled stream would differ from the input. Reassemble the
+        // FRESH bytes of every chunk (the last new_bytes of data) and require
+        // byte-exact equality with the input across many reuse cycles, including
+        // a smaller trailing chunk.
+        let input: &[u8] = b"0123456789ABCDEFGHIJKLM"; // 23 bytes, all distinct
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'0', 1)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(5) // 5,5,5,5,3 -> reuse + a smaller final chunk
+            .unwrap();
+        let mut reader = filter.attach(Cursor::new(input));
+
+        let mut reassembled = Vec::new();
+        while let Some(chunk) = reader.read_next().unwrap() {
+            let fresh_start = chunk.data.len() - chunk.new_bytes;
+            reassembled.extend_from_slice(&chunk.data[fresh_start..]);
+        }
+        assert_eq!(
+            reassembled, input,
+            "reused buffer corrupted the stream (stale bytes leaked between chunks)"
+        );
+    }
+
+    #[test]
+    fn kernel_filter_skip_decisions_move_reader_past_skipped_region() {
+        use crate::kernel::{KernelFilter, SkipDecision};
+
+        // Input: 20 bytes. Region [3,7) = "SKIP" is reported by the kernel filter
+        // as a no-match region; the seekable reader should start the first chunk
+        // at offset 7 instead of 0.
+        let input: &[u8] = b"aaaSKIPaaaaMATCHaaaa";
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 4)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(8)
+            .unwrap();
+
+        let kernel_filter = KernelFilter::with_test_skips(
+            vec![ByteThreshold::new(b'a', 4)],
+            vec![SkipDecision {
+                inode: 0,
+                file_offset: 3,
+                skip_length: 4,
+            }],
+        );
+
+        let mut reader = filter.attach_seekable(Cursor::new(input));
+        reader.set_kernel_filter(kernel_filter);
+
+        let chunk = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk.offset, 7, "first chunk must start after the skipped region");
+        assert_eq!(chunk.new_bytes, 8);
+        // The chunk should begin at the first byte after the skipped region.
+        assert_eq!(
+            chunk.data,
+            b"aaaaMATC",
+            "data must start at the byte following the skipped region"
+        );
+    }
+
+    #[test]
+    fn non_seekable_reader_ignores_skip_decisions_and_reads_from_start() {
+        use crate::kernel::{KernelFilter, SkipDecision};
+
+        // Same 20-byte input and same [3,7) skip decision as the seekable test,
+        // but attached to a NON-seekable reader (`attach`, seek_fn == None). The
+        // read_next hot path must NOT poll or apply the skip: the reader stays at
+        // offset 0 and reads the region the kernel claimed skippable. This pins
+        // the "poll only when seekable" contract (Law 10 no silent degrade) and
+        // the allocation-free non-seekable path (no per-chunk skip Vec is built).
+        let input: &[u8] = b"aaaSKIPaaaaMATCHaaaa";
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 4)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(8)
+            .unwrap();
+
+        let kernel_filter = KernelFilter::with_test_skips(
+            vec![ByteThreshold::new(b'a', 4)],
+            vec![SkipDecision {
+                inode: 0,
+                file_offset: 3,
+                skip_length: 4,
+            }],
+        );
+
+        // `attach` (not `attach_seekable`) leaves seek_fn == None.
+        let mut reader = filter.attach(Cursor::new(input));
+        reader.set_kernel_filter(kernel_filter);
+
+        let chunk = reader.read_next().unwrap().unwrap();
+        assert_eq!(
+            chunk.offset, 0,
+            "non-seekable reader must start at offset 0, ignoring the skip decision"
+        );
+        assert_eq!(chunk.new_bytes, 8);
+        assert_eq!(
+            chunk.data, b"aaaSKIPa",
+            "non-seekable reader must read the region the kernel filter claimed skippable"
+        );
     }
 }

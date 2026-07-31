@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! S-perf-pmg: byte-frequency filter edge catalog.
 
 use ebpfsieve::{ByteFrequencyFilter, ByteThreshold, Error, MatchWindow};

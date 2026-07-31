@@ -2,19 +2,20 @@
 members = ["."]
 
 [package]
+exclude = ["BACKLOG.md", "target/"]
 name = "ebpfsieve"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.85"
-authors = ["Corum Collective LLC <contact@santh.io>"]
+authors = ["Corum Collective LLC <contact@santh.dev>"]
 description = "Byte-frequency prefilter for read-heavy scanning pipelines with optional eBPF offload"
 license = "MIT"
-repository = "https://github.com/santhsecurity/ebpfsieve"
-homepage = "https://github.com/santhsecurity/ebpfsieve"
+repository = "https://github.com/santhreal/ebpfsieve"
+homepage = "https://santh.dev"
 documentation = "https://docs.rs/ebpfsieve"
 readme = "README.md"
-keywords = ["ebpf", "sieve", "performance", "filtering", "prefilter"]
-categories = ["network-programming", "os", "performance"]
+keywords = ["ebpf", "prefilter", "pattern-matching", "filtering", "performance"]
+categories = ["network-programming", "os", "concurrency"]
 include = ["src/**", "Cargo.toml", "README.md", "LICENSE", "build.rs"]
 
 [dependencies]
@@ -23,12 +24,9 @@ toml = { version = "0.8", optional = true }
 thiserror = "2"
 libc = "0.2"
 aya = { version = "0.13", optional = true }
-# ebpfkit isn't on crates.io yet; consume the standalone
-# santhsecurity/ebpfkit repo by git ref so the standalone
-# ebpfsieve repo builds for external users. (The previous
-# path = "../../kernel/ebpfkit" assumed a monorepo layout
-# that doesn't exist outside the Santh monorepo.)
-ebpfkit = { git = "https://github.com/santhsecurity/ebpfkit", branch = "main", optional = true }
+# ebpfkit is published on crates.io; consume it by version so the
+# standalone ebpfsieve crate resolves for external users.
+ebpfkit = { version = "0.1", optional = true }
 
 [[test]]
 name = "shard_s_perf_pmg_edge"

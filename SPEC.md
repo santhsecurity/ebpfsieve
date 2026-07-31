@@ -1,4 +1,4 @@
-# ebpfsieve — Technical Spec
+# ebpfsieve: Technical Spec
 
 ## Overview
 

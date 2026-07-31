@@ -21,6 +21,10 @@ pub struct ByteFrequencyFilter {
     window_size: usize,
     chunk_size: usize,
     max_matches: usize,
+    /// Precomputed map from byte value to the indices of thresholds that
+    /// reference that byte. Built once at construction to avoid allocating a
+    /// 256-element `Vec` array on every call to `matching_windows`.
+    byte_to_threshold_indices: Vec<Vec<usize>>,
 }
 
 impl ByteFrequencyFilter {
@@ -43,11 +47,14 @@ impl ByteFrequencyFilter {
             });
         }
 
+        let byte_to_threshold_indices = Self::build_byte_to_threshold_indices(&thresholds);
+
         Ok(Self {
             thresholds,
             window_size: 4096,
             chunk_size: 64 * 1024,
             max_matches: 1_000_000,
+            byte_to_threshold_indices,
         })
     }
 
@@ -74,12 +81,19 @@ impl ByteFrequencyFilter {
     ///
     /// # Errors
     ///
-    /// Returns an error if `chunk_size` is 0.
+    /// Returns an error if `chunk_size` is 0 or larger than the platform's
+    /// maximum allocation size (`isize::MAX`).
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Result<Self> {
         if chunk_size == 0 {
             return Err(Error::InvalidConfiguration {
                 reason: "chunk_size cannot be zero".to_string(),
                 fix: "provide a chunk_size of at least 1",
+            });
+        }
+        if chunk_size > isize::MAX as usize {
+            return Err(Error::InvalidConfiguration {
+                reason: format!("chunk_size {chunk_size} exceeds the maximum safe allocation size"),
+                fix: "provide a chunk_size no larger than isize::MAX",
             });
         }
         self.chunk_size = chunk_size;
@@ -123,13 +137,11 @@ impl ByteFrequencyFilter {
     /// Returns whether a single byte slice satisfies the filter.
     #[must_use]
     pub fn matches_bytes(&self, bytes: &[u8]) -> bool {
-        let mut counts = [0u16; 256];
+        let mut counts = [0usize; 256];
         for &byte in bytes {
-            counts[byte as usize] = counts[byte as usize].saturating_add(1);
+            counts[byte as usize] += 1;
         }
-        self.thresholds
-            .iter()
-            .all(|threshold| counts[threshold.byte as usize] >= threshold.min_count)
+        self.window_matches(&counts)
     }
 
     /// Returns every matching window in a byte slice.
@@ -143,9 +155,9 @@ impl ByteFrequencyFilter {
         }
 
         let window = self.window_size.min(bytes.len());
-        let mut counts = [0u16; 256];
+        let mut counts = [0usize; 256];
         for &byte in &bytes[..window] {
-            counts[byte as usize] = counts[byte as usize].saturating_add(1);
+            counts[byte as usize] += 1;
         }
 
         // Track satisfied threshold count for O(1) per-position checking.
@@ -153,14 +165,11 @@ impl ByteFrequencyFilter {
         // the thresholds for the byte that changed (entered/left the window).
         let mut satisfied = 0usize;
         let total_thresholds = self.thresholds.len();
-        // Map: byte value → list of threshold indices that reference this byte
-        let mut byte_to_thresholds = [const { Vec::new() }; 256];
-        for (i, t) in self.thresholds.iter().enumerate() {
-            byte_to_thresholds[t.byte as usize].push(i);
-        }
+        // Use the precomputed byte -> threshold-indices map.
+        let byte_to_thresholds = &self.byte_to_threshold_indices;
         let mut threshold_met = vec![false; total_thresholds];
         for (i, t) in self.thresholds.iter().enumerate() {
-            if counts[t.byte as usize] >= t.min_count {
+            if counts[t.byte as usize] >= usize::from(t.min_count) {
                 threshold_met[i] = true;
                 satisfied += 1;
             }
@@ -182,13 +191,13 @@ impl ByteFrequencyFilter {
                 let removed = bytes[start - 1] as usize;
                 let added = bytes[start + window - 1] as usize;
                 counts[removed] = counts[removed].saturating_sub(1);
-                counts[added] = counts[added].saturating_add(1);
+                counts[added] += 1;
 
                 // Only recheck thresholds affected by the changed bytes.
                 for &ti in &byte_to_thresholds[removed] {
                     let was_met = threshold_met[ti];
-                    let now_met =
-                        counts[self.thresholds[ti].byte as usize] >= self.thresholds[ti].min_count;
+                    let now_met = counts[self.thresholds[ti].byte as usize]
+                        >= usize::from(self.thresholds[ti].min_count);
                     if was_met && !now_met {
                         satisfied -= 1;
                         threshold_met[ti] = false;
@@ -196,8 +205,8 @@ impl ByteFrequencyFilter {
                 }
                 for &ti in &byte_to_thresholds[added] {
                     let was_met = threshold_met[ti];
-                    let now_met =
-                        counts[self.thresholds[ti].byte as usize] >= self.thresholds[ti].min_count;
+                    let now_met = counts[self.thresholds[ti].byte as usize]
+                        >= usize::from(self.thresholds[ti].min_count);
                     if !was_met && now_met {
                         satisfied += 1;
                         threshold_met[ti] = true;
@@ -239,16 +248,26 @@ impl ByteFrequencyFilter {
         let mut matches = Vec::new();
         let mut bytes_read_total: u64 = 0;
         loop {
-            // Check byte limit before reading next chunk
+            // Before reading the next chunk, clamp the read size to the remaining
+            // max_bytes budget so we do not over-read and block on slow streams
+            // when the limit is already satisfied.
             if let Some(limit) = max_bytes {
                 if bytes_read_total >= limit {
                     break;
+                }
+                let remaining = limit - bytes_read_total;
+                let chunk = u64::try_from(self.chunk_size).unwrap_or(u64::MAX);
+                if remaining < chunk {
+                    attachment.set_next_read_limit(usize::try_from(remaining).unwrap_or(usize::MAX));
                 }
             }
             match attachment.read_next() {
                 Ok(None) => break,
                 Ok(Some(chunk)) => {
-                    bytes_read_total += chunk.data.len() as u64;
+                    // Count only newly-read bytes, not the window length: the
+                    // window repeats the previous chunk's overlap, so using
+                    // data.len() overcounts and trips max_bytes early.
+                    bytes_read_total += chunk.new_bytes as u64;
                     matches.extend(chunk.candidate_ranges);
                     // Check if we've reached max_matches
                     if matches.len() >= self.max_matches {
@@ -263,6 +282,13 @@ impl ByteFrequencyFilter {
             }
         }
         Ok(matches)
+    }
+
+    /// Attach this filter to a seekable reader, enabling kernel-filter skip decisions
+    /// to advance the reader past no-match regions.
+    #[must_use]
+    pub fn attach_seekable<R: Read + Seek>(self, reader: R) -> FileReadFilter<R> {
+        FileReadFilter::new_seekable(reader, self)
     }
 
     /// Loads a `ByteFrequencyFilter` configuration from a TOML string.
@@ -313,7 +339,8 @@ impl ByteFrequencyFilter {
     /// Loads a `ByteFrequencyFilter` configuration from a TOML file.
     #[cfg(feature = "serde")]
     pub fn from_toml_file(path: impl AsRef<Path>) -> Result<Self> {
-        let content = fs::read_to_string(path).map_err(|source| Error::ReadFailed { source })?;
+        let content = fs::read_to_string(path)
+            .map_err(|source| Error::ConfigurationReadFailed { source })?;
         Self::from_toml_str(&content)
     }
 
@@ -340,10 +367,23 @@ impl ByteFrequencyFilter {
         MatchWindowIter::new(self, bytes)
     }
 
-    pub(crate) fn window_matches(&self, counts: &[u16; 256]) -> bool {
+    pub(crate) fn window_matches(&self,
+        counts: &[usize; 256],
+    ) -> bool {
         self.thresholds
             .iter()
-            .all(|threshold| counts[threshold.byte as usize] >= threshold.min_count)
+            .all(|threshold| counts[threshold.byte as usize] >= usize::from(threshold.min_count))
+    }
+
+    /// Build the byte -> threshold-indices map used by the sliding-window
+    /// hot path. Kept as a method so construction and deserialization can share
+    /// the same logic.
+    fn build_byte_to_threshold_indices(thresholds: &[ByteThreshold]) -> Vec<Vec<usize>> {
+        let mut map = vec![Vec::new(); 256];
+        for (i, t) in thresholds.iter().enumerate() {
+            map[t.byte as usize].push(i);
+        }
+        map
     }
 
     /// Loads a JIT classic BPF socket filter and attaches it to `fd` via `SO_ATTACH_BPF`.

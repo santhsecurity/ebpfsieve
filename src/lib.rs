@@ -28,6 +28,9 @@
 
 #![deny(unsafe_code)]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+// Unit tests legitimately unwrap; the manifest-level [lints.clippy] deny
+// would otherwise fail `cargo clippy --all-targets` on test builds.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod error;
 mod iter;

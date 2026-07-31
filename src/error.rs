@@ -11,6 +11,13 @@ pub enum Error {
         /// Actionable repair guidance.
         fix: &'static str,
     },
+    /// Reading the filter configuration file failed.
+    #[error("failed to read configuration file: {source}. Fix: ensure the path exists and is readable by the current user")]
+    ConfigurationReadFailed {
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
     /// Reading from the attached source failed.
     #[error("read failed: {source}. Fix: verify the reader remains open and readable")]
     ReadFailed {

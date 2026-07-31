@@ -178,12 +178,15 @@ fn test_14_all_thresholds_u16_max() {
 #[test]
 #[allow(clippy::unwrap_used)]
 fn test_15_chunk_size_usize_max() {
-    let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'A', 1)])
+    // `usize::MAX` is absurd for a chunk size and would cause an OOM panic when
+    // the read buffer is resized. It must be rejected at configuration time.
+    let result = ByteFrequencyFilter::new([ByteThreshold::new(b'A', 1)])
         .unwrap()
-        .with_chunk_size(usize::MAX)
-        .unwrap();
-    let matches = filter.matching_windows(b"A");
-    assert_eq!(matches.len(), 1);
+        .with_chunk_size(usize::MAX);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("chunk_size"));
+    assert!(err.contains("isize::MAX"));
 }
 
 #[test]

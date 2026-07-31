@@ -787,7 +787,7 @@ fn iterator_first_match_only() {
 fn iterator_lazy_evaluation() {
     // NOTE: MatchWindowIter has a bug - it panics on second call to next()
     // This test documents the expected behavior and verifies the first match only.
-    // See: https://github.com/santhsecurity/Santh/issues/XXX
+    // See: https://github.com/santhreal/Santh/issues/XXX
     let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'x', 1)])
         .unwrap()
         .with_window_size(5)

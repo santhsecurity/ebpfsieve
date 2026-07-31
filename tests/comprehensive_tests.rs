@@ -659,16 +659,19 @@ fn compile_multiple_thresholds_bytecode() {
 
 #[test]
 #[cfg(feature = "socket-bpf")]
-fn literal_pattern_encoding() {
-    // Verify literal pattern encoding merges same-byte thresholds
+fn non_contiguous_thresholds_compile_to_frequency_socket_filter() {
+    // Non-contiguous thresholds cannot be encoded as a contiguous literal.
+    // The socket filter must compile a frequency-counting program instead.
     let filter =
         ByteFrequencyFilter::new([ByteThreshold::new(b'x', 2), ByteThreshold::new(b'y', 3)])
             .unwrap();
 
-    let pattern = byte_frequency_filter_to_literal_pattern(&filter).unwrap();
-
-    // Pattern should have 2 x's and 3 y's (sorted)
-    assert_eq!(pattern, vec![b'x', b'x', b'y', b'y', b'y']);
+    assert!(
+        byte_frequency_filter_to_literal_pattern(&filter).is_err(),
+        "literal pattern should reject non-contiguous thresholds"
+    );
+    let insns = compile_socket_filter_program(&filter).unwrap();
+    assert!(!insns.is_empty(), "frequency socket filter should compile");
 }
 
 #[test]
@@ -786,25 +789,21 @@ fn iterator_first_match_only() {
 
 #[test]
 fn iterator_lazy_evaluation() {
-    // NOTE: MatchWindowIter has a bug - it panics on second call to next()
-    // This test documents the expected behavior and verifies the first match only.
-    // See: https://github.com/santhsecurity/Santh/issues/XXX
     let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'x', 1)])
         .unwrap()
         .with_window_size(5)
         .unwrap();
 
-    // Data longer than window
     let data = vec![b'x'; 20];
 
-    // Iterator should yield first match correctly
-    let mut iter = filter.matching_windows_iter(&data);
-    let first = iter.next();
-    assert!(first.is_some(), "Iterator should yield first match");
-    assert_eq!(first.unwrap().offset, 0);
-
-    // NOTE: Subsequent calls to next() will panic due to bug in iter.rs line 56
-    // This is a known issue with the MatchWindowIter implementation
+    // Iterator should yield every match window, matching the collecting
+    // `matching_windows()` output, without panicking on subsequent calls.
+    let iter_matches: Vec<_> = filter.matching_windows_iter(&data).collect();
+    let vec_matches = filter.matching_windows(&data);
+    assert_eq!(iter_matches, vec_matches);
+    assert!(!iter_matches.is_empty());
+    assert_eq!(iter_matches[0].offset, 0);
+    assert_eq!(iter_matches.last().unwrap().offset, 15);
 }
 
 #[test]
@@ -825,12 +824,16 @@ fn iterator_data_shorter_than_window() {
         .with_window_size(10)
         .unwrap();
 
-    // When data is shorter than window, iterator has bug (overflow in subtraction)
-    // matching_windows handles this correctly with clamping
-    // Test with matching_windows which handles this case
-    let matches = filter.matching_windows(b"aab");
-    assert_eq!(matches.len(), 1); // Single window clamped to data length
-    assert_eq!(matches[0].length, 3); // Window length clamped to data
+    // When data is shorter than the window, the iterator should clamp the
+    // window to the data length and yield the same single window as
+    // `matching_windows`.
+    let data = b"aab";
+    let iter_matches: Vec<_> = filter.matching_windows_iter(data).collect();
+    let vec_matches = filter.matching_windows(data);
+    assert_eq!(iter_matches, vec_matches);
+    assert_eq!(iter_matches.len(), 1);
+    assert_eq!(iter_matches[0].offset, 0);
+    assert_eq!(iter_matches[0].length, 3);
 }
 
 #[test]
@@ -898,8 +901,8 @@ fn file_scan_with_max_bytes() {
         .with_chunk_size(32)
         .unwrap();
 
-    // Scan only 50 bytes - before pattern at 100
-    // With 32-byte chunks: reads 64 bytes (2 chunks), then stops (64 >= 50)
+    // Scan only 50 bytes - before pattern at 100.
+    // The final read is clamped to the remaining budget, so we never read past 50.
     let mut f = std::fs::File::open(&temp_path).unwrap();
     let matches = filter.scan_file(&mut f, Some(50)).unwrap();
     assert!(
@@ -907,9 +910,8 @@ fn file_scan_with_max_bytes() {
         "Should not find pattern when limited to 50 bytes (pattern at 100)"
     );
 
-    // Scan 130 bytes - allows reading chunk containing pattern at byte 100
-    // With 32-byte chunks: reads 160 bytes (5 chunks: 0-31, 32-63, 64-95, 96-127, 128-159)
-    // Pattern at 100-109 is in chunk 96-127
+    // Scan 130 bytes - allows reading chunk containing pattern at byte 100.
+    // With 32-byte chunks and clamping: reads 32, 32, 32, 32, 2 = 130 bytes.
     let mut f = std::fs::File::open(&temp_path).unwrap();
     let matches = filter.scan_file(&mut f, Some(130)).unwrap();
     assert!(
@@ -918,6 +920,33 @@ fn file_scan_with_max_bytes() {
     );
 
     let _ = std::fs::remove_file(temp_path);
+}
+
+#[test]
+fn u16_counts_do_not_saturate_in_large_windows() {
+    // Regression: matching_windows/iterator used u16 histograms. With a window
+    // larger than 65535, a threshold below 65535 but above the saturated headroom
+    // produced false negatives once enough of the high-count byte left the window.
+    // window_size=66000, threshold 'a'=50000, data has 66000 'a's then 16001 'b's.
+    // At offset 15536 the true 'a' count is 50464 (>=50000) but a u16 histogram
+    // reads 49999 (<50000), so a u16 implementation stops matching early.
+    let window_size = 66_000;
+    let threshold_count = 50_000;
+    let trailing = 16_001;
+    let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', threshold_count)])
+        .unwrap()
+        .with_window_size(window_size)
+        .unwrap()
+        .with_max_matches(20_000);
+
+    let mut data = vec![b'a'; window_size];
+    data.extend(vec![b'b'; trailing]);
+
+    let matches = filter.matching_windows(&data);
+    assert_eq!(matches.len(), 16_001);
+
+    let iter_matches: Vec<_> = filter.matching_windows_iter(&data).collect();
+    assert_eq!(iter_matches, matches);
 }
 
 #[test]

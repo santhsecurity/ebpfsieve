@@ -1,4 +1,4 @@
-# ebpfsieve-fuzz — Technical Spec
+# ebpfsieve-fuzz: Technical Spec
 
 ## Overview
 

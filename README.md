@@ -1,17 +1,15 @@
 # ebpfsieve
 
-Part of [Santh](https://santh.dev) - open source Rust security and infrastructure tooling. Follow [@SanthProject](https://x.com/SanthProject) on X.
-
 Byte-frequency prefilter for read-heavy scanning pipelines, with optional eBPF offload.
 
 ## What it does
 
 `ebpfsieve` slides a fixed-size window over byte streams and reports candidate windows where all required byte-count thresholds are met. The idea is to cheaply reject data before handing it to a more expensive verifier.
 
-- **Userspace filtering** — pure Rust, no dependencies on kernel features.
-- **Lazy iteration** — `matching_windows_iter` yields matches one at a time without allocating a `Vec`.
-- **Chunked readers** — attach the filter to any `Read` impl and get per-chunk candidate ranges with automatic carry-over across chunk boundaries.
-- **Optional eBPF** — on Linux with the right features enabled, compile and load classic BPF socket filters or `aya`-based `fentry/vfs_read` probes.
+- **Userspace filtering** (pure Rust, no dependencies on kernel features).
+- **Lazy iteration**: `matching_windows_iter` yields matches one at a time without allocating a `Vec`.
+- **Chunked readers**, attach the filter to any `Read` impl and get per-chunk candidate ranges with automatic carry-over across chunk boundaries.
+- **Optional eBPF**, on Linux with the right features enabled, compile and load classic BPF socket filters or `aya`-based `fentry/vfs_read` probes.
 
 ## Quick start
 
@@ -59,9 +57,9 @@ if let Some(first) = iter.next() {
 
 ## Optional features
 
-- **`serde`** — load filter rules from TOML with `from_toml_str` / `from_toml_file`.
-- **`socket-bpf`** — compile and load classic `BPF_PROG_TYPE_SOCKET_FILTER` programs via `ebpfkit` (Linux only).
-- **`kernel-bpf`** — load `aya`-based `fentry/vfs_read` probes (Linux ≥ 5.8, BTF, root required).
+- **`serde`** (load filter rules from TOML with `from_toml_str` / `from_toml_file`).
+- **`socket-bpf`** (compile and load classic `BPF_PROG_TYPE_SOCKET_FILTER` programs via `ebpfkit` (Linux only)).
+- **`kernel-bpf`** (load `aya`-based `fentry/vfs_read` probes (Linux ≥ 5.8, BTF, root required)).
 
 ## Errors
 
