@@ -47,3 +47,8 @@ pub use program::ByteFrequencyFilter;
 
 #[cfg(all(target_os = "linux", feature = "socket-bpf"))]
 pub use kernel::SocketFilterProgram;
+
+/// Compile-checks the README quick-start example as a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeExamples;

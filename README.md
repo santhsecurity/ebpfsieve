@@ -23,6 +23,7 @@ let filter = ByteFrequencyFilter::new([
 
 let matches = filter.matching_windows(b"xyzaaaxyz");
 assert_eq!(matches[0].offset, 1); // "yzaaa"
+# Ok::<(), ebpfsieve::Error>(())
 ```
 
 ## Filtering model
@@ -33,14 +34,19 @@ A `ByteFrequencyFilter` is built from one or more `ByteThreshold` values. A wind
 
 ```rust
 use ebpfsieve::{ByteFrequencyFilter, ByteThreshold};
-use std::fs::File;
 
 let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'x', 2)])?
     .with_window_size(64)?
     .with_chunk_size(4096)?;
 
-let mut file = File::open("data.bin")?;
+// Any file works; here we write a small one to scan.
+let path = std::env::temp_dir().join("ebpfsieve_readme_scan.bin");
+std::fs::write(&path, b"aaaxyz xray xylophone".repeat(100))?;
+let mut file = std::fs::File::open(&path)?;
 let matches = filter.scan_file(&mut file, Some(1_000_000))?;
+assert!(!matches.is_empty());
+std::fs::remove_file(&path)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## Lazy iteration
@@ -48,11 +54,14 @@ let matches = filter.scan_file(&mut file, Some(1_000_000))?;
 For internet-scale scanning, avoid collecting all matches into a `Vec`:
 
 ```rust
+use ebpfsieve::{ByteFrequencyFilter, ByteThreshold};
+
 let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 1)])?;
 let mut iter = filter.matching_windows_iter(b"banana");
 if let Some(first) = iter.next() {
     println!("first match at offset {}", first.offset);
 }
+# Ok::<(), ebpfsieve::Error>(())
 ```
 
 ## Optional features

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.3] - 2026-08-02
+
+### Fixed
+- README examples were stale or did not compile against the real API. They are rewritten and wired as doctests, so documentation drift now fails `cargo test`.
+
 ## [0.1.2] - 2026-07-30
 
 ### Fixed
