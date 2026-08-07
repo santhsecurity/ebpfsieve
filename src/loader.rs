@@ -186,8 +186,8 @@ impl<R: Read> FileReadFilter<R> {
         if let Some(seek_fn) = self.seek_fn {
             if let Some(kf) = self.kernel_filter.as_mut() {
                 for decision in kf.poll_skips() {
-                    if decision.file_offset >= self.next_offset {
-                        let skip_end = decision.file_offset.saturating_add(decision.skip_length);
+                    let skip_end = decision.file_offset.saturating_add(decision.skip_length);
+                    if skip_end > self.next_offset {
                         match seek_fn(&mut self.reader, SeekFrom::Start(skip_end)) {
                             Ok(new_pos) => {
                                 self.next_offset = new_pos;
@@ -573,5 +573,55 @@ mod tests {
             chunk2.candidate_ranges.is_empty(),
             "no match must straddle the skip boundary"
         );
+    }
+    #[test]
+    fn kernel_filter_overlapping_skip_decision_advances_reader_when_skip_end_exceeds_next_offset() {
+        use crate::kernel::{KernelFilter, SkipDecision};
+        use std::io::Cursor;
+
+        // Input: 64 bytes
+        // Offsets 0..16: chunk 1 data
+        // Offsets 16..32: skipped by decision (file_offset: 10, skip_length: 22 -> skip_end: 32)
+        // Notice file_offset (10) < next_offset (16), but skip_end (32) > next_offset (16).
+        // Offsets 32..48: chunk 2 data
+        let mut input = Vec::new();
+        input.extend_from_slice(b"0123456789abcdef"); // 0..16
+        input.extend_from_slice(b"SKIP_REGION_____"); // 16..32
+        input.extend_from_slice(b"CHUNK2_DATA_____"); // 32..48
+        input.extend_from_slice(b"TRAILING_DATA___"); // 48..64
+
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 1)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(16)
+            .unwrap();
+
+        let mut reader = filter.attach_seekable(Cursor::new(&input[..]));
+
+        // Read chunk 1 (offsets 0..16); next_offset becomes 16
+        let chunk1 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk1.offset, 0);
+        assert_eq!(chunk1.data, b"0123456789abcdef");
+
+        // Attach a skip decision starting at 10 (before next_offset 16) but extending to 32
+        let kf = KernelFilter::with_test_skips(
+            vec![ByteThreshold::new(b'a', 1)],
+            vec![SkipDecision {
+                inode: 0,
+                file_offset: 10,
+                skip_length: 22, // 10 + 22 = 32
+            }],
+        );
+        reader.set_kernel_filter(kf).unwrap();
+
+        // Chunk 2: must apply the skip decision because skip_end (32) > next_offset (16),
+        // seeking to offset 32 and reading b"CHUNK2_DATA_____"
+        let chunk2 = reader.read_next().unwrap().unwrap();
+        assert_eq!(
+            chunk2.offset, 32,
+            "chunk offset must advance to 32 despite file_offset being < 16"
+        );
+        assert_eq!(chunk2.data, b"CHUNK2_DATA_____");
     }
 }

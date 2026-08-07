@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5] - 2026-08-07
+
+### Fixed
+- Fixed kernel skip decision boundary evaluation in `FileReadFilter`: skip decisions starting before `next_offset` but ending past `next_offset` (`skip_end > next_offset`) now correctly advance the reader and clear carry overlap instead of being silently dropped.
+- Added `attach_socket_ebpf_to_fd` fallback method when compiling without `socket-bpf` or on non-Linux platforms, returning `Error::EbpfUnavailable` with actionable guidance rather than failing compilation.
+- Audited eBPF sieve compile/load/attach, ring buffer fail-closed error propagation (`open_ring_buffer`), and socket filter BPF instruction bounds checking.
+
 ## [0.1.4] - 2026-08-07
 
 - Clear carry after successful kernel skip-seek so matches cannot span skipped regions.

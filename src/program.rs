@@ -421,6 +421,15 @@ impl ByteFrequencyFilter {
             Some(prog) => prog.attach_to_fd(fd),
         }
     }
+    /// Returns [`Error::EbpfUnavailable`] when the crate was compiled without the `socket-bpf`
+    /// feature flag or on a non-Linux OS.
+    #[cfg(not(all(target_os = "linux", feature = "socket-bpf")))]
+    pub fn attach_socket_ebpf_to_fd(&self, _fd: std::os::raw::c_int) -> Result<()> {
+        Err(Error::EbpfUnavailable {
+            reason: "socket BPF filter requires Linux and the 'socket-bpf' feature flag",
+            fix: "enable the 'socket-bpf' feature when building for Linux, or use userspace ByteFrequencyFilter",
+        })
+    }
 }
 
 #[cfg(test)]
@@ -675,6 +684,16 @@ mod tests {
                     length: 5
                 },
             ]
+        );
+    }
+    #[test]
+    #[cfg(not(all(target_os = "linux", feature = "socket-bpf")))]
+    fn socket_ebpf_unavailable_without_feature_or_non_linux() {
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 1)]).unwrap();
+        let err = filter.attach_socket_ebpf_to_fd(3).unwrap_err();
+        assert!(
+            matches!(err, Error::EbpfUnavailable { .. }),
+            "attach_socket_ebpf_to_fd must return EbpfUnavailable when feature/OS is absent, got: {err:?}"
         );
     }
 }
