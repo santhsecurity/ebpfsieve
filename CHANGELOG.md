@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4] - 2026-08-07
+
+- Clear carry after successful kernel skip-seek so matches cannot span skipped regions.
+- `set_kernel_filter` fails closed on non-seekable readers (`Result`).
+- Zero-alloc threshold bitset + O(1) MatchWindowIter parity with matching_windows.
+- Authors/status metadata updated (`stable`).
+
+
 ## [0.1.3] - 2026-08-02
 
 ### Fixed

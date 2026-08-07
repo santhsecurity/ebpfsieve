@@ -4,10 +4,10 @@ members = ["."]
 [package]
 exclude = ["BACKLOG.md", "target/"]
 name = "ebpfsieve"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.85"
-authors = ["Corum Collective LLC <contact@santh.dev>"]
+authors = ["Santh <64453045+santhreal@users.noreply.github.com>"]
 description = "Byte-frequency prefilter for read-heavy scanning pipelines with optional eBPF offload"
 license = "MIT"
 repository = "https://github.com/santhreal/ebpfsieve"
@@ -16,6 +16,9 @@ documentation = "https://docs.rs/ebpfsieve"
 readme = "README.md"
 keywords = ["ebpf", "prefilter", "pattern-matching", "filtering", "performance"]
 categories = ["network-programming", "os", "concurrency"]
+
+[package.metadata.santh]
+status = "stable"
 include = ["src/**", "Cargo.toml", "README.md", "LICENSE", "build.rs"]
 
 [dependencies]

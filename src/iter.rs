@@ -1,5 +1,6 @@
 //! Zero-allocation sliding window iterator for byte frequency matching.
 
+use crate::map::ThresholdBitset;
 use crate::{ByteFrequencyFilter, MatchWindow};
 
 /// Zero-allocation iterator over matching windows.
@@ -33,11 +34,14 @@ pub struct MatchWindowIter<'a> {
     /// `max_matches`, so it and the collecting `matching_windows()` surface the
     /// same number of windows instead of the iterator running unbounded.
     emitted: usize,
+    satisfied: usize,
+    threshold_met: ThresholdBitset,
 }
 
 impl<'a> MatchWindowIter<'a> {
     pub(crate) fn new(filter: &'a ByteFrequencyFilter, bytes: &'a [u8]) -> Self {
         let window = filter.window_size().min(bytes.len());
+        let total_thresholds = filter.thresholds().len();
         Self {
             filter,
             bytes,
@@ -46,6 +50,8 @@ impl<'a> MatchWindowIter<'a> {
             pos: 0,
             initialized: false,
             emitted: 0,
+            satisfied: 0,
+            threshold_met: ThresholdBitset::new(total_thresholds),
         }
     }
 }
@@ -63,13 +69,21 @@ impl Iterator for MatchWindowIter<'_> {
             return None;
         }
 
+        let total_thresholds = self.filter.thresholds().len();
+
         if !self.initialized {
             for &byte in &self.bytes[..self.window] {
                 self.counts[byte as usize] += 1;
             }
+            for (i, t) in self.filter.thresholds().iter().enumerate() {
+                if self.counts[t.byte as usize] >= usize::from(t.min_count) {
+                    self.threshold_met.set(i);
+                    self.satisfied += 1;
+                }
+            }
             self.initialized = true;
             self.pos = 1;
-            if self.filter.window_matches(&self.counts) {
+            if self.satisfied == total_thresholds {
                 self.emitted += 1;
                 return Some(MatchWindow {
                     offset: 0,
@@ -78,6 +92,7 @@ impl Iterator for MatchWindowIter<'_> {
             }
         }
 
+        let byte_to_thresholds = self.filter.byte_to_threshold_indices();
         while self.pos + self.window <= self.bytes.len() {
             let removed = self.bytes[self.pos - 1] as usize;
             let added = self.bytes[self.pos + self.window - 1] as usize;
@@ -85,7 +100,29 @@ impl Iterator for MatchWindowIter<'_> {
             self.counts[added] += 1;
             let pos = self.pos;
             self.pos += 1;
-            if self.filter.window_matches(&self.counts) {
+
+            if removed != added {
+                for &ti in &byte_to_thresholds[removed] {
+                    let was_met = self.threshold_met.get(ti);
+                    let now_met = self.counts[self.filter.thresholds()[ti].byte as usize]
+                        >= usize::from(self.filter.thresholds()[ti].min_count);
+                    if was_met && !now_met {
+                        self.satisfied -= 1;
+                        self.threshold_met.clear(ti);
+                    }
+                }
+                for &ti in &byte_to_thresholds[added] {
+                    let was_met = self.threshold_met.get(ti);
+                    let now_met = self.counts[self.filter.thresholds()[ti].byte as usize]
+                        >= usize::from(self.filter.thresholds()[ti].min_count);
+                    if !was_met && now_met {
+                        self.satisfied += 1;
+                        self.threshold_met.set(ti);
+                    }
+                }
+            }
+
+            if self.satisfied == total_thresholds {
                 self.emitted += 1;
                 return Some(MatchWindow {
                     offset: pos as u64,
@@ -120,5 +157,21 @@ mod tests {
             2,
             "collecting method caps at max_matches too"
         );
+    }
+
+    #[test]
+    fn iterator_and_matching_windows_are_identical() {
+        let filter = ByteFrequencyFilter::new([
+            ByteThreshold::new(b'a', 2),
+            ByteThreshold::new(b'b', 1),
+        ])
+        .unwrap()
+        .with_window_size(4)
+        .unwrap();
+
+        let data = b"xxaabxxbaaxxaabxxaabxx";
+        let via_vec = filter.matching_windows(data);
+        let via_iter: Vec<_> = filter.matching_windows_iter(data).collect();
+        assert_eq!(via_vec, via_iter, "iterator and matching_windows must produce identical windows");
     }
 }

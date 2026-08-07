@@ -61,3 +61,49 @@ pub struct MatchWindow {
     /// Number of bytes covered by the candidate window.
     pub length: usize,
 }
+/// Stack-allocated bitset for up to 256 thresholds, falling back to a `Vec` if larger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ThresholdBitset {
+    Inline([u64; 4]),
+    Heap(Vec<u64>),
+}
+
+impl ThresholdBitset {
+    pub(crate) fn new(size: usize) -> Self {
+        if size <= 256 {
+            Self::Inline([0u64; 4])
+        } else {
+            Self::Heap(vec![0u64; (size + 63) / 64])
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, index: usize) -> bool {
+        let word = index / 64;
+        let bit = index % 64;
+        match self {
+            Self::Inline(arr) => (arr[word] & (1u64 << bit)) != 0,
+            Self::Heap(vec) => (vec[word] & (1u64 << bit)) != 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, index: usize) {
+        let word = index / 64;
+        let bit = index % 64;
+        match self {
+            Self::Inline(arr) => arr[word] |= 1u64 << bit,
+            Self::Heap(vec) => vec[word] |= 1u64 << bit,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn clear(&mut self, index: usize) {
+        let word = index / 64;
+        let bit = index % 64;
+        match self {
+            Self::Inline(arr) => arr[word] &= !(1u64 << bit),
+            Self::Heap(vec) => vec[word] &= !(1u64 << bit),
+        }
+    }
+}

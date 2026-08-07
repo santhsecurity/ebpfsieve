@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::error::{Error, Result};
 use crate::iter::MatchWindowIter;
 use crate::loader::FileReadFilter;
-use crate::map::{ByteThreshold, MatchWindow};
+use crate::map::{ByteThreshold, MatchWindow, ThresholdBitset};
 
 /// Byte-frequency filter that rejects windows lacking required byte counts.
 ///
@@ -121,6 +121,12 @@ impl ByteFrequencyFilter {
     pub fn window_size(&self) -> usize {
         self.window_size
     }
+    /// Returns the precomputed byte-to-threshold-indices mapping.
+    #[must_use]
+    pub(crate) fn byte_to_threshold_indices(&self) -> &[Vec<usize>] {
+        &self.byte_to_threshold_indices
+    }
+
 
     /// Returns the attached-reader chunk size in bytes.
     #[must_use]
@@ -167,10 +173,10 @@ impl ByteFrequencyFilter {
         let total_thresholds = self.thresholds.len();
         // Use the precomputed byte -> threshold-indices map.
         let byte_to_thresholds = &self.byte_to_threshold_indices;
-        let mut threshold_met = vec![false; total_thresholds];
+        let mut threshold_met = ThresholdBitset::new(total_thresholds);
         for (i, t) in self.thresholds.iter().enumerate() {
             if counts[t.byte as usize] >= usize::from(t.min_count) {
-                threshold_met[i] = true;
+                threshold_met.set(i);
                 satisfied += 1;
             }
         }
@@ -194,22 +200,24 @@ impl ByteFrequencyFilter {
                 counts[added] += 1;
 
                 // Only recheck thresholds affected by the changed bytes.
-                for &ti in &byte_to_thresholds[removed] {
-                    let was_met = threshold_met[ti];
-                    let now_met = counts[self.thresholds[ti].byte as usize]
-                        >= usize::from(self.thresholds[ti].min_count);
-                    if was_met && !now_met {
-                        satisfied -= 1;
-                        threshold_met[ti] = false;
+                if removed != added {
+                    for &ti in &byte_to_thresholds[removed] {
+                        let was_met = threshold_met.get(ti);
+                        let now_met = counts[self.thresholds[ti].byte as usize]
+                            >= usize::from(self.thresholds[ti].min_count);
+                        if was_met && !now_met {
+                            satisfied -= 1;
+                            threshold_met.clear(ti);
+                        }
                     }
-                }
-                for &ti in &byte_to_thresholds[added] {
-                    let was_met = threshold_met[ti];
-                    let now_met = counts[self.thresholds[ti].byte as usize]
-                        >= usize::from(self.thresholds[ti].min_count);
-                    if !was_met && now_met {
-                        satisfied += 1;
-                        threshold_met[ti] = true;
+                    for &ti in &byte_to_thresholds[added] {
+                        let was_met = threshold_met.get(ti);
+                        let now_met = counts[self.thresholds[ti].byte as usize]
+                            >= usize::from(self.thresholds[ti].min_count);
+                        if !was_met && now_met {
+                            satisfied += 1;
+                            threshold_met.set(ti);
+                        }
                     }
                 }
 

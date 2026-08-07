@@ -1,6 +1,6 @@
 //! File reading and chunk loading.
 
-use crate::error::Error;
+use crate::error::{Error, Result};
 use crate::kernel::KernelFilter;
 use crate::map::MatchWindow;
 use crate::program::ByteFrequencyFilter;
@@ -131,10 +131,18 @@ impl<R: Read> FileReadFilter<R> {
 
     /// Attach a kernel filter that will emit skip decisions for this reader.
     ///
-    /// Skip decisions are only applied when the reader is seekable; otherwise they are
-    /// ignored (no silent fallback).
-    pub fn set_kernel_filter(&mut self, filter: KernelFilter) {
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidConfiguration` if the reader is not seekable.
+    pub fn set_kernel_filter(&mut self, filter: KernelFilter) -> Result<()> {
+        if self.seek_fn.is_none() {
+            return Err(Error::InvalidConfiguration {
+                reason: "kernel filter cannot be attached to a non-seekable reader".to_string(),
+                fix: "create the reader using attach_seekable to enable kernel filter skip decisions",
+            });
+        }
         self.kernel_filter = Some(filter);
+        Ok(())
     }
 
     /// Returns the attached filter configuration.
@@ -181,7 +189,10 @@ impl<R: Read> FileReadFilter<R> {
                     if decision.file_offset >= self.next_offset {
                         let skip_end = decision.file_offset.saturating_add(decision.skip_length);
                         match seek_fn(&mut self.reader, SeekFrom::Start(skip_end)) {
-                            Ok(new_pos) => self.next_offset = new_pos,
+                            Ok(new_pos) => {
+                                self.next_offset = new_pos;
+                                self.carry.clear();
+                            }
                             Err(source) => {
                                 let carry_len = self.carry.len();
                                 let chunk_offset =
@@ -451,7 +462,7 @@ mod tests {
         );
 
         let mut reader = filter.attach_seekable(Cursor::new(input));
-        reader.set_kernel_filter(kernel_filter);
+        reader.set_kernel_filter(kernel_filter).unwrap();
 
         let chunk = reader.read_next().unwrap().unwrap();
         assert_eq!(chunk.offset, 7, "first chunk must start after the skipped region");
@@ -465,15 +476,9 @@ mod tests {
     }
 
     #[test]
-    fn non_seekable_reader_ignores_skip_decisions_and_reads_from_start() {
+    fn non_seekable_reader_rejects_kernel_filter_attachment() {
         use crate::kernel::{KernelFilter, SkipDecision};
 
-        // Same 20-byte input and same [3,7) skip decision as the seekable test,
-        // but attached to a NON-seekable reader (`attach`, seek_fn == None). The
-        // read_next hot path must NOT poll or apply the skip: the reader stays at
-        // offset 0 and reads the region the kernel claimed skippable. This pins
-        // the "poll only when seekable" contract (Law 10 no silent degrade) and
-        // the allocation-free non-seekable path (no per-chunk skip Vec is built).
         let input: &[u8] = b"aaaSKIPaaaaMATCHaaaa";
         let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 4)])
             .unwrap()
@@ -491,19 +496,82 @@ mod tests {
             }],
         );
 
-        // `attach` (not `attach_seekable`) leaves seek_fn == None.
         let mut reader = filter.attach(Cursor::new(input));
-        reader.set_kernel_filter(kernel_filter);
-
-        let chunk = reader.read_next().unwrap().unwrap();
-        assert_eq!(
-            chunk.offset, 0,
-            "non-seekable reader must start at offset 0, ignoring the skip decision"
+        assert!(
+            reader.set_kernel_filter(kernel_filter).is_err(),
+            "set_kernel_filter on non-seekable reader must return error"
         );
-        assert_eq!(chunk.new_bytes, 8);
+    }
+
+    #[test]
+    fn kernel_filter_skip_clears_carry_and_prevents_discontinuity_matches() {
+        use crate::kernel::{KernelFilter, SkipDecision};
+        use std::io::Cursor;
+
+        // Input: 40 bytes
+        // 0..8:   b"0123xxaa"
+        // 8..16:  b"SKIP1111" (skipped by filter 1 [8, 16))
+        // 16..24: b"aaxx4567" (read as chunk 1 at offset 16; carry = b"567")
+        // 24..32: b"SKIP2222" (skipped by filter 2 [24, 32))
+        // 32..40: b"89012345" (read as chunk 2 at offset 32)
+        // If carry (b"567") were NOT cleared on skip decision 2:
+        // - chunk 2 offset would be 32 - 3 = 29 (WRONG)
+        // - chunk 2 data would be b"56789012345" (WRONG)
+        // With carry cleared:
+        // - chunk 2 offset is 32
+        // - chunk 2 data is b"89012345"
+        let mut input = Vec::new();
+        input.extend_from_slice(b"0123xxaa"); // 0..8
+        input.extend_from_slice(b"SKIP1111"); // 8..16
+        input.extend_from_slice(b"aaxx4567"); // 16..24
+        input.extend_from_slice(b"SKIP2222"); // 24..32
+        input.extend_from_slice(b"89012345"); // 32..40
+
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 4)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(8)
+            .unwrap();
+
+        let kf1 = KernelFilter::with_test_skips(
+            vec![ByteThreshold::new(b'a', 4)],
+            vec![SkipDecision {
+                inode: 0,
+                file_offset: 8,
+                skip_length: 8,
+            }],
+        );
+
+        let mut reader = filter.attach_seekable(Cursor::new(&input[..]));
+        reader.set_kernel_filter(kf1).unwrap();
+
+        // Chunk 1: decision 1 skips 8..16; reads 16..24 (b"aaxx4567").
+        let chunk1 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk1.offset, 16);
+        assert_eq!(chunk1.data, b"aaxx4567");
+
+        // Now attach decision 2 for offset 24..32.
+        let kf2 = KernelFilter::with_test_skips(
+            vec![ByteThreshold::new(b'a', 4)],
+            vec![SkipDecision {
+                inode: 0,
+                file_offset: 24,
+                skip_length: 8,
+            }],
+        );
+        reader.set_kernel_filter(kf2).unwrap();
+
+        // Chunk 2: decision 2 skips 24..32; carry from chunk 1 (b"567") must be cleared!
+        let chunk2 = reader.read_next().unwrap().unwrap();
         assert_eq!(
-            chunk.data, b"aaaSKIPa",
-            "non-seekable reader must read the region the kernel filter claimed skippable"
+            chunk2.offset, 32,
+            "chunk offset must be 32 after skip, not 32 - carry_len"
+        );
+        assert_eq!(chunk2.data, b"89012345");
+        assert!(
+            chunk2.candidate_ranges.is_empty(),
+            "no match must straddle the skip boundary"
         );
     }
 }
