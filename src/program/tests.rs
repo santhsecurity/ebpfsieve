@@ -255,3 +255,40 @@ fn matching_windows_iter_respects_max_matches() {
     let count = filter.matching_windows_iter(b"aaaa").count();
     assert_eq!(count, 2);
 }
+#[test]
+fn test_scan_path_unseekable_pipe_or_special_file() {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fifo_path = temp_dir.path().join("test_fifo");
+        let c_fifo = CString::new(fifo_path.to_str().unwrap()).unwrap();
+        // Create a FIFO named pipe
+        unsafe {
+            libc::mkfifo(c_fifo.as_ptr(), 0o600);
+        }
+
+        // Spawn a background writer thread to write into the FIFO
+        let fifo_path_clone = fifo_path.clone();
+        let writer_thread = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(fifo_path_clone)
+                .unwrap();
+            file.write_all(b"hello world with aaaa inside").unwrap();
+        });
+
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'a', 4)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap();
+
+        // scan_path on the FIFO path (unseekable) should succeed without returning ESPIPE error
+        let matches = filter.scan_path(&fifo_path, None).unwrap();
+        assert_eq!(matches.len(), 1);
+
+        writer_thread.join().unwrap();
+    }
+}

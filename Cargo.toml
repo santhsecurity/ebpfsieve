@@ -4,7 +4,7 @@ members = ["."]
 [package]
 exclude = ["BACKLOG.md", "target/"]
 name = "ebpfsieve"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Santh <64453045+santhreal@users.noreply.github.com>"]

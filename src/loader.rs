@@ -187,7 +187,7 @@ impl<R: Read> FileReadFilter<R> {
             if let Some(kf) = self.kernel_filter.as_mut() {
                 for decision in kf.poll_skips() {
                     let skip_end = decision.file_offset.saturating_add(decision.skip_length);
-                    if skip_end > self.next_offset {
+                    if skip_end >= self.next_offset {
                         match seek_fn(&mut self.reader, SeekFrom::Start(skip_end)) {
                             Ok(new_pos) => {
                                 self.next_offset = new_pos;
@@ -622,6 +622,48 @@ mod tests {
             chunk2.offset, 32,
             "chunk offset must advance to 32 despite file_offset being < 16"
         );
+        assert_eq!(chunk2.data, b"CHUNK2_DATA_____");
+    }
+    #[test]
+    fn kernel_filter_exact_boundary_skip_decision_clears_carry_at_next_offset() {
+        use crate::kernel::{KernelFilter, SkipDecision};
+        use std::io::Cursor;
+
+        // Input data: 32 bytes
+        // Offsets 0..16: chunk 1 ("0123456789abcdef") -> carry will contain "def" (offsets 13..16)
+        // Offsets 16..32: chunk 2 ("CHUNK2_DATA_____")
+        let mut input = Vec::new();
+        input.extend_from_slice(b"0123456789abcdef"); // 0..16
+        input.extend_from_slice(b"CHUNK2_DATA_____"); // 16..32
+
+        let filter = ByteFrequencyFilter::new([ByteThreshold::new(b'f', 1)])
+            .unwrap()
+            .with_window_size(4)
+            .unwrap()
+            .with_chunk_size(16)
+            .unwrap();
+
+        let mut reader = filter.attach_seekable(Cursor::new(&input[..]));
+
+        // Read chunk 1 (0..16); carry becomes last 3 bytes "def"
+        let chunk1 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk1.offset, 0);
+
+        // Inject a skip decision ending EXACTLY at next_offset 16 (file_offset: 0, skip_length: 16 -> skip_end: 16)
+        let kf = KernelFilter::with_test_skips(
+            vec![ByteThreshold::new(b'f', 1)],
+            vec![SkipDecision {
+                inode: 0,
+                file_offset: 0,
+                skip_length: 16, // skip_end = 16 == next_offset
+            }],
+        );
+        reader.set_kernel_filter(kf).unwrap();
+
+        // Chunk 2: skip decision with skip_end == 16 MUST clear carry so stale carry "def" from the
+        // skipped region 0..16 does not form a match with chunk 2.
+        let chunk2 = reader.read_next().unwrap().unwrap();
+        assert_eq!(chunk2.offset, 16);
         assert_eq!(chunk2.data, b"CHUNK2_DATA_____");
     }
 }

@@ -362,8 +362,7 @@ impl ByteFrequencyFilter {
         max_bytes: Option<u64>,
     ) -> Result<Vec<MatchWindow>> {
         let mut file = File::open(path).map_err(|source| Error::ReadFailed { source })?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|source| Error::ReadFailed { source })?;
+        let _ = file.seek(SeekFrom::Start(0));
         self.scan_file(&mut file, max_bytes)
     }
 

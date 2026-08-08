@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.6] - 2026-08-08
+
+### Fixed
+- Fixed exact boundary skip decision handling in `FileReadFilter`: kernel skip decisions ending at `skip_end >= next_offset` now clear stale carry overlap from skipped regions, preventing phantom matches across chunk boundaries.
+- Fixed `ByteFrequencyFilter::scan_path` on unseekable file paths (such as FIFOs and pipes): seek failures on newly opened files are safely ignored so `scan_file` can scan unseekable paths without returning spurious `ESPIPE` errors.
+- Audited BPF compilation, `KernelFilter` fail-closed error propagation, and `MatchWindowIter` parity contracts.
 ## [0.1.5] - 2026-08-07
 
 ### Fixed
